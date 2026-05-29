@@ -7,8 +7,9 @@ textColor = "#FFFFFF"
 font = "sans serif"
 
 [server]
-headless = false
-port = 8501
+# headless = true skips Streamlit's first-run email prompt. With it false,
+# a cloud deploy blocks on that prompt (no stdin) and the server never starts.
+headless = true
 
 [browser]
 gatherUsageStats = false
