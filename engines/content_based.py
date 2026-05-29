@@ -79,11 +79,11 @@ def _apply_filters(candidates: list[dict], mood: str,
 
 
 class ContentEngine:
-    def __init__(self):
-        # load embedding model now (during app startup spinner) so the
-        # first user search isn't penalised by the ~10s one-time load
-        _get_embed_model()
-
+    # NOTE: the embedding model is intentionally NOT loaded here. It loads
+    # lazily on the first recommend() call (see _get_embed_model). This keeps
+    # torch/sentence-transformers out of memory at startup so the app boots
+    # under tight memory limits (e.g. Streamlit Community Cloud ~1GB). Cost:
+    # the first Discover search pays a one-time ~10s model-load.
     def recommend(self, seed_title: str, mood: str = None,
                   language_filter: str = None) -> dict:
         # ── 1. Find + enrich seed (only the seed needs full enrichment) ──
