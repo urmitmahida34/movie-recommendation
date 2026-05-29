@@ -101,72 +101,98 @@ class ItemCFRecommender:
 class FunkSVDRecommender:
     """
     Regularised matrix factorisation via SGD — the algorithm from Simon Funk's
-    Netflix Prize submission. Uses the Surprise library for training.
-    Vectorised prediction: O(n_factors × n_items) per user, essentially instant.
+    Netflix Prize submission. Trained with the Surprise library, but after
+    training only the learned parameters (plain numpy arrays + id maps) are
+    kept and serialised — the Surprise objects are discarded.
+
+    This keeps inference free of Surprise: the saved model is just numpy +
+    dicts, so it unpickles safely in any environment (no C-extension objects
+    to deserialise, which can segfault across builds) and needs no Surprise
+    import at runtime. Vectorised prediction: O(n_factors × n_items) per user.
     """
 
     def fit(self, train_df, n_factors: int = 100, n_epochs: int = 20,
             lr: float = 0.005, reg: float = 0.02, save_path: str = None):
         from surprise import SVD as SurpriseSVD, Dataset, Reader
 
-        reader   = Reader(rating_scale=(1, 5))
-        data     = Dataset.load_from_df(train_df[["user_id", "movie_id", "rating"]], reader)
-        self.trainset = data.build_full_trainset()
+        reader = Reader(rating_scale=(1, 5))
+        data   = Dataset.load_from_df(train_df[["user_id", "movie_id", "rating"]], reader)
+        trainset = data.build_full_trainset()
 
-        self.algo = SurpriseSVD(
+        algo = SurpriseSVD(
             n_factors=n_factors, n_epochs=n_epochs,
             lr_all=lr, reg_all=reg, verbose=True,
         )
-        self.algo.fit(self.trainset)
+        algo.fit(trainset)
 
-        # inner_iid → raw movie_id lookup (built once at fit time)
-        self._inner_to_mid = {
-            inner_iid: self.trainset.to_raw_iid(inner_iid)
-            for inner_iid in range(self.trainset.n_items)
+        self._extract(trainset, algo)
+        if save_path:
+            self.save(save_path)
+        return self
+
+    def _extract(self, trainset, algo):
+        """Pull the learned parameters out of the Surprise objects into plain
+        numpy arrays + id maps, then drop all Surprise references."""
+        self.global_mean = float(trainset.global_mean)
+        self.pu = np.asarray(algo.pu, dtype=np.float32)
+        self.bu = np.asarray(algo.bu, dtype=np.float32)
+        self.bi = np.asarray(algo.bi, dtype=np.float32)
+        self.qi = np.asarray(algo.qi, dtype=np.float32)
+        self.user_inner   = {trainset.to_raw_uid(u): u for u in range(trainset.n_users)}
+        self.inner_to_mid = {i: trainset.to_raw_iid(i) for i in range(trainset.n_items)}
+        self.mid_to_inner = {mid: i for i, mid in self.inner_to_mid.items()}
+        self.user_seen = {
+            trainset.to_raw_uid(u): {iid for iid, _ in trainset.ur[u]}
+            for u in range(trainset.n_users)
         }
 
-        if save_path:
-            with open(save_path, "wb") as f:
-                pickle.dump(self, f)
-        return self
+    def save(self, path: str):
+        with open(path, "wb") as f:
+            pickle.dump({
+                "global_mean":  self.global_mean,
+                "pu": self.pu, "bu": self.bu, "bi": self.bi, "qi": self.qi,
+                "user_inner":   self.user_inner,
+                "inner_to_mid": self.inner_to_mid,
+                "mid_to_inner": self.mid_to_inner,
+                "user_seen":    self.user_seen,
+            }, f)
 
     @classmethod
     def load(cls, path: str):
+        obj = cls()
         with open(path, "rb") as f:
-            return pickle.load(f)
+            obj.__dict__.update(pickle.load(f))
+        return obj
 
     def recommend(self, user_id: int, n: int = TOP_N_RECOMMENDATIONS,
                   allowed_movie_ids: set = None):
         """SVD top-N. If allowed_movie_ids is given, candidates are restricted
         to that set first (e.g. a persona's signature genres) and then ranked
         by predicted rating — a genre-filter + collaborative-ranking hybrid."""
-        try:
-            u_inner = self.trainset.to_inner_uid(user_id)
-        except ValueError:
+        u = self.user_inner.get(user_id)
+        if u is None:
             return []
 
-        seen_inner = {iid for iid, _ in self.trainset.ur[u_inner]}
-
-        p_u = self.algo.pu[u_inner]
-        b_u = self.algo.bu[u_inner]
-        mu  = self.trainset.global_mean
+        seen = self.user_seen.get(user_id, set())
 
         # vectorised: predict all items at once
-        scores = mu + b_u + self.algo.bi + self.algo.qi @ p_u
+        scores = self.global_mean + self.bu[u] + self.bi + self.qi @ self.pu[u]
 
-        predictions = [
-            (mid, float(np.clip(scores[i_inner], 1.0, 5.0)))
-            for i_inner in range(len(scores))
-            if i_inner not in seen_inner
-            and (mid := self._inner_to_mid[i_inner]) is not None
-            and (allowed_movie_ids is None or mid in allowed_movie_ids)
-        ]
+        predictions = []
+        for i in range(len(scores)):
+            if i in seen:
+                continue
+            mid = self.inner_to_mid[i]
+            if allowed_movie_ids is not None and mid not in allowed_movie_ids:
+                continue
+            predictions.append((mid, float(np.clip(scores[i], 1.0, 5.0))))
         predictions.sort(key=lambda x: x[1], reverse=True)
         return predictions[:n]
 
     def predict_single(self, user_id: int, movie_id: int) -> float:
-        try:
-            pred = self.algo.predict(user_id, movie_id)
-            return float(np.clip(pred.est, 1.0, 5.0))
-        except Exception:
-            return self.trainset.global_mean
+        u = self.user_inner.get(user_id)
+        i = self.mid_to_inner.get(movie_id)
+        if u is None or i is None:
+            return self.global_mean
+        score = self.global_mean + self.bu[u] + self.bi[i] + self.qi[i] @ self.pu[u]
+        return float(np.clip(score, 1.0, 5.0))

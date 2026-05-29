@@ -33,10 +33,10 @@ print("\nComputing RMSE on test set (sample 10k)...")
 sample = test_df.sample(min(10000, len(test_df)), random_state=42)
 actuals, estimates = [], []
 for row in sample.itertuples():
-    p = funk.algo.predict(row.user_id, row.movie_id)
-    if p.est is not None and not p.details.get("was_impossible"):
+    # skip users/items not seen in training (matches old "was_impossible" skip)
+    if row.user_id in funk.user_inner and row.movie_id in funk.mid_to_inner:
         actuals.append(row.rating)
-        estimates.append(p.est)
+        estimates.append(funk.predict_single(row.user_id, row.movie_id))
 rmse = float(np.sqrt(np.mean((np.array(actuals) - np.array(estimates)) ** 2)))
 print(f"  RMSE: {rmse:.4f}")
 
