@@ -1,0 +1,18 @@
+venv/
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.db
+data/raw/
+# ignore model artifacts EXCEPT the two the app loads at runtime
+# (so they ship to the deploy host — they're 31M + 28M, under GitHub's 100M limit)
+data/models/*
+!data/models/meta.pkl
+!data/models/funk_svd.pkl
+data/tmdb_cache/
+.DS_Store
+*.ipynb_checkpoints
+notebooks/.ipynb_checkpoints/
+# Streamlit Cloud secrets live in the dashboard, never commit a local copy
+.streamlit/secrets.toml
